@@ -1,168 +1,218 @@
-import React from "react";
-import CodeEditor from "./components/CodeEditor";
-import FileExplorer from "./components/FileExplorer";
-import Terminal from "./components/Terminal";
-import ResizablePane from "./components/ResizablePane";
-import { FileType } from "./types";
-import { loadPyodideInstance } from "./pyodide/pyodideLoader";
-import JSZip from "jszip";
-import { saveAs } from "file-saver";
+import React, { useState } from 'react';
+import axios from 'axios';
+import { v4 as uuidv4 } from 'uuid';
+import FileExplorer from './components/FileExplorer';
+import Editor from './components/Editor';
+import Terminal from './components/Terminal';
+import { FileNode } from './types';
 
-const DEFAULT_FILE = { name: "main.py", content: "print('Hello from Python!')" };
+function findNodeById(node: FileNode, id: string): FileNode | null {
+  if (node.id === id) return node;
+  if (node.type === 'folder') {
+    for (let child of node.children!) {
+      const found = findNodeById(child, id);
+      if (found) return found;
+    }
+  }
+  return null;
+}
 
-function App() {
-  const [files, setFiles] = React.useState<FileType[]>([DEFAULT_FILE]);
-  const [currentFile, setCurrentFile] = React.useState<string>("main.py");
-  const [output, setOutput] = React.useState<string>("");
-  const [pyodide, setPyodide] = React.useState<any>(null);
-  const [loadingPyodide, setLoadingPyodide] = React.useState(true);
+function updateNodeById(node: FileNode, id: string, update: Partial<FileNode>): FileNode {
+  if (node.id === id) {
+    return { ...node, ...update };
+  }
+  if (node.type === 'folder') {
+    return {
+      ...node,
+      children: node.children!.map(child => updateNodeById(child, id, update)),
+    };
+  }
+  return node;
+}
 
-  React.useEffect(() => {
-    (async () => {
-      // Load pyodide from CDN
-      // @ts-ignore
-      if (!window.loadPyodide) {
-        const script = document.createElement("script");
-        script.src = "https://cdn.jsdelivr.net/pyodide/v0.25.1/full/pyodide.js";
-        script.onload = async () => {
-          const instance = await loadPyodideInstance();
-          setPyodide(instance);
-          setLoadingPyodide(false);
-        };
-        document.body.appendChild(script);
-      } else {
-        const instance = await loadPyodideInstance();
-        setPyodide(instance);
-        setLoadingPyodide(false);
+function deleteNodeById(node: FileNode, id: string): FileNode | null {
+  if (node.id === id) return null;
+  if (node.type === 'folder') {
+    return {
+      ...node,
+      children: node.children!.map(child => deleteNodeById(child, id)).filter(Boolean) as FileNode[],
+    };
+  }
+  return node;
+}
+
+function addNodeToParent(node: FileNode, parentId: string, newNode: FileNode): FileNode {
+  if (node.id === parentId && node.type === 'folder') {
+    return {
+      ...node,
+      children: [...node.children!, newNode],
+    };
+  }
+  if (node.type === 'folder') {
+    return {
+      ...node,
+      children: node.children!.map(child => addNodeToParent(child, parentId, newNode)),
+    };
+  }
+  return node;
+}
+
+const initialFilesTree: FileNode = {
+  id: uuidv4(),
+  name: 'project',
+  type: 'folder',
+  children: [
+    {
+      id: uuidv4(),
+      name: 'main.py',
+      type: 'file',
+      content: 'print("Hello, Python IDE!")',
+    }
+  ],
+};
+
+function getFirstFileId(node: FileNode): string | null {
+  if (node.type === 'file') return node.id;
+  for (let child of node.children!) {
+    const result = getFirstFileId(child);
+    if (result) return result;
+  }
+  return null;
+}
+
+function getMainFilePath(node: FileNode, mainFileId: string, currPath = ''): string | null {
+  const path = currPath ? currPath + '/' + node.name : node.name;
+  if (node.id === mainFileId && node.type === 'file') return path;
+  if (node.type === 'folder') {
+    for (let child of node.children!) {
+      const found = getMainFilePath(child, mainFileId, path);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+const App: React.FC = () => {
+  const [filesTree, setFilesTree] = useState<FileNode>(initialFilesTree);
+  const [selectedFileId, setSelectedFileId] = useState<string | null>(getFirstFileId(initialFilesTree));
+  const [stdout, setStdout] = useState('');
+  const [stderr, setStderr] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const selectedFile = selectedFileId ? findNodeById(filesTree, selectedFileId) : null;
+
+  // File/folder operations
+  const handleAdd = (parentId: string, type: 'file' | 'folder') => {
+    const name = window.prompt(`New ${type} name?`, type === 'file' ? 'untitled.py' : 'new_folder');
+    if (!name) return;
+    const newNode: FileNode = type === 'file'
+      ? { id: uuidv4(), name, type, content: '' }
+      : { id: uuidv4(), name, type, children: [] };
+    setFilesTree(prev => addNodeToParent(prev, parentId, newNode));
+    if (type === 'file') setSelectedFileId(newNode.id);
+  };
+
+  const handleRename = (id: string, newName: string) => {
+    if (!newName) return;
+    setFilesTree(prev => updateNodeById(prev, id, { name: newName }));
+  };
+
+  const handleDelete = (id: string) => {
+    if (!window.confirm('Are you sure you want to delete?')) return;
+    setFilesTree(prev => {
+      const updated = deleteNodeById(prev, id);
+      // If deleted file was selected, select first file found
+      if (selectedFileId === id) {
+        setSelectedFileId(getFirstFileId(updated!));
       }
-    })();
-  }, []);
-
-  const onCodeChange = (newCode: string) => {
-    setFiles(files =>
-      files.map(f => f.name === currentFile ? { ...f, content: newCode } : f)
-    );
+      return updated!;
+    });
   };
 
-  const onAddFile = () => {
-    let base = "untitled";
-    let idx = 1;
-    let candidate = `${base}${idx}.py`;
-    while (files.some(f => f.name === candidate)) {
-      idx++;
-      candidate = `${base}${idx}.py`;
-    }
-    setFiles([...files, { name: candidate, content: "" }]);
-    setCurrentFile(candidate);
+  const handleEditorChange = (val: string) => {
+    if (!selectedFileId) return;
+    setFilesTree(prev => updateNodeById(prev, selectedFileId, { content: val }));
   };
 
-  const onDeleteFile = (filename: string) => {
-    if (files.length === 1) return;
-    setFiles(fs => fs.filter(f => f.name !== filename));
-    if (currentFile === filename) {
-      const idx = files.findIndex(f => f.name === filename);
-      const next = files[idx === 0 ? 1 : idx - 1];
-      setCurrentFile(next.name);
-    }
-  };
-
-  const onRenameFile = (oldName: string, newName: string) => {
-    if (!/^[\w\-]+\.py$/.test(newName)) return alert("Invalid filename (must end with .py and use only letters, numbers, _, -)");
-    if (files.some(f => f.name === newName)) return alert("File already exists");
-    setFiles(fs => fs.map(f => f.name === oldName ? { ...f, name: newName } : f));
-    if (currentFile === oldName) setCurrentFile(newName);
-  };
-
-  const runCode = async () => {
-    if (!pyodide) return;
-    setOutput("[Running Python...]\n");
-    // Write all files to Pyodide's FS
-    for (const file of files) {
-      try {
-        pyodide.FS.writeFile(file.name, file.content);
-      } catch (e) {
-        // File may not exist yet
-        pyodide.FS.writeFile(file.name, file.content, { encoding: "utf8" });
-      }
-    }
+  // Run code
+  const handleRun = async () => {
+    if (!selectedFileId) return;
+    setLoading(true);
+    setStdout('');
+    setStderr('');
+    const mainFilePath = getMainFilePath(filesTree, selectedFileId);
     try {
-      // Redirect stdout/stderr
-      let stdout = "";
-      let stderr = "";
-      pyodide.setStdout({ batched: (s: string) => { stdout += s; } });
-      pyodide.setStderr({ batched: (s: string) => { stderr += s; } });
-
-      await pyodide.runPythonAsync(`import sys\nsys.path.append('.')`);
-      await pyodide.runPythonAsync(files.find(f => f.name === currentFile)!.content);
-      setOutput(stdout + (stderr ? "\n[stderr]\n" + stderr : ""));
-    } catch (err: any) {
-      setOutput(prev => prev + "\n[Python Error]\n" + (err.toString() || "Unknown error"));
+      const res = await axios.post('http://localhost:5000/run', {
+        filesTree,
+        mainFile: mainFilePath,
+      });
+      setStdout(res.data.stdout);
+      setStderr(res.data.stderr);
+    } catch (e: any) {
+      setStdout('');
+      setStderr(e.message);
+    } finally {
+      setLoading(false);
     }
   };
-
-  const downloadZip = async () => {
-    const zip = new JSZip();
-    for (const file of files) {
-      zip.file(file.name, file.content);
-    }
-    const blob = await zip.generateAsync({ type: "blob" });
-    saveAs(blob, "python_project.zip");
-  };
-
-  const currentFileObj = files.find(f => f.name === currentFile)!;
 
   return (
-    <div style={{ width: "100vw", height: "100vh", background: "#181818", color: "#fff", display: "flex", flexDirection: "column" }}>
-      <header style={{ background: "#252526", padding: "10px 20px", fontWeight: 600, fontSize: 20, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <span>Python Browser IDE</span>
-        <div>
-          <button onClick={runCode} disabled={loadingPyodide} style={{ marginRight: 8, padding: "6px 16px", fontSize: 16, background: "#007acc", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer" }}>
-            ▶️ Run
-          </button>
-          <button onClick={downloadZip} style={{ padding: "6px 16px", fontSize: 16, background: "#3c3c3c", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer" }}>
-            📦 Download ZIP
-          </button>
-        </div>
-      </header>
-      <div style={{ flex: 1, display: "flex", height: "1px" }}>
-        <ResizablePane direction="horizontal" initialSize={220} minSize={140} maxSize={400}>
-          {/* File Explorer */}
-          <FileExplorer
-            files={files}
-            currentFile={currentFile}
-            onSelect={setCurrentFile}
-            onAdd={onAddFile}
-            onDelete={onDeleteFile}
-            onRename={onRenameFile}
-          />
-          {/* Editor + Terminal (Vertical Split) */}
-          <ResizablePane direction="vertical" initialSize={window.innerHeight * 0.56} minSize={100} maxSize={window.innerHeight * 0.9}>
-            {/* Code Editor */}
-            <div style={{ height: "100%", background: "#1e1e1e" }}>
-              <CodeEditor
-                code={currentFileObj.content}
-                onChange={onCodeChange}
-              />
-            </div>
-            {/* Terminal */}
-            <Terminal
-              output={output}
-              onClear={() => setOutput("")}
-            />
-          </ResizablePane>
-        </ResizablePane>
+    <div style={{ display: 'flex', height: '100vh', fontFamily: 'sans-serif', background: '#f6f8fa' }}>
+      {/* Sidebar: File Explorer */}
+      <div style={{ width: 240, borderRight: '1px solid #ddd', padding: 10, background: '#fff', overflowY: 'auto' }}>
+        <div style={{ fontWeight: 'bold', marginBottom: 6 }}>Files</div>
+        <FileExplorer
+          filesTree={filesTree}
+          selectedFileId={selectedFileId}
+          onSelect={setSelectedFileId}
+          onAdd={handleAdd}
+          onRename={handleRename}
+          onDelete={handleDelete}
+        />
       </div>
-      {loadingPyodide && (
-        <div style={{
-          position: "fixed", left: 0, top: 0, width: "100vw", height: "100vh",
-          background: "rgba(0,0,0,0.7)", color: "#fff", display: "flex",
-          alignItems: "center", justifyContent: "center", zIndex: 1000
-        }}>
-          <div style={{ fontSize: 22 }}>Loading Python engine...</div>
+      {/* Main Area: Editor + Terminal */}
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+        {/* Editor Header */}
+        <div style={{ display: 'flex', alignItems: 'center', padding: '8px 16px', borderBottom: '1px solid #ddd', background: '#fff' }}>
+          <span style={{ fontWeight: 'bold', flex: 1 }}>
+            {selectedFile?.name || 'No file selected'}
+          </span>
+          <button
+            style={{
+              background: '#36b',
+              color: '#fff',
+              border: 'none',
+              borderRadius: 4,
+              padding: '8px 14px',
+              cursor: 'pointer'
+            }}
+            onClick={handleRun}
+            disabled={!selectedFile || loading}
+          >
+            ▶ Run
+          </button>
         </div>
-      )}
+        {/* Editor and Terminal Split */}
+        <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
+          {/* Editor */}
+          <div style={{ flex: 2, borderRight: '1px solid #ddd', minWidth: 0, background: '#f6f8fa' }}>
+            {selectedFile && selectedFile.type === 'file' ? (
+              <Editor value={selectedFile.content || ''} onChange={handleEditorChange} />
+            ) : (
+              <div style={{ color: '#888', padding: 24 }}>Select a file to edit.</div>
+            )}
+          </div>
+          {/* Terminal */}
+          <div style={{ flex: 1, minWidth: 0, background: '#151515', display: 'flex', flexDirection: 'column' }}>
+            <div style={{ fontWeight: 'bold', color: '#fff', background: '#222', padding: 8, borderBottom: '1px solid #222' }}>Terminal</div>
+            <div style={{ flex: 1, minHeight: 0 }}>
+              <Terminal stdout={stdout} stderr={stderr} loading={loading} />
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   );
-}
+};
 
 export default App;

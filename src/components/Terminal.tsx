@@ -1,37 +1,31 @@
-import React from "react";
+import React from 'react';
 
-type Props = {
-  output: string;
-  onClear: () => void;
+type TerminalProps = {
+  stdout: string;
+  stderr: string;
+  loading: boolean;
 };
 
-const Terminal: React.FC<Props> = ({ output, onClear }) => (
+const Terminal: React.FC<TerminalProps> = ({ stdout, stderr, loading }) => (
   <div style={{
-    background: "#1e1e1e",
-    color: "#d4d4d4",
-    fontFamily: "monospace",
+    background: '#1e1e1e',
+    color: '#d4d4d4',
     padding: 12,
-    height: "100%",
-    overflowY: "auto",
-    position: "relative"
+    height: '100%',
+    overflow: 'auto',
+    fontFamily: 'monospace',
+    fontSize: 15,
+    borderRadius: 6,
+    whiteSpace: 'pre-wrap'
   }}>
-    <button
-      style={{
-        position: "absolute",
-        top: 8,
-        right: 8,
-        background: "#333",
-        color: "#eee",
-        border: "none",
-        borderRadius: 4,
-        cursor: "pointer",
-        padding: "2px 8px"
-      }}
-      onClick={onClear}
-    >
-      Clear
-    </button>
-    <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{output}</pre>
+    {loading ? (
+      <div style={{ color: '#6cf' }}>Running...</div>
+    ) : (
+      <>
+        {stdout && <div style={{ color: '#d4d4d4' }}>{stdout}</div>}
+        {stderr && <div style={{ color: '#ff6', background: '#4a2', padding: 4 }}>{stderr}</div>}
+      </>
+    )}
   </div>
 );
 
